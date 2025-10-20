@@ -240,26 +240,6 @@ struct Page *buddy_alloc_pages(size_t n) {
     if (n == 0) {
         n = 1;  // 至少分配1页
     }
-    // 计算请求层级
-    int layer = find_suitable_layer(n);
-    if (layer < 0) {
-        cprintf("[BUDDY] 错误: 无法找到合适的层级 (请求页数=%d)\n", n);
-        return NULL;
-    }
-
-    // 检查是否还有可用块
-    if (buddy_free_count[layer] == 0) {
-        // 向上查找更大的块
-        int upper = layer - 1;
-        while (upper >= 0 && buddy_free_count[upper] == 0) {
-            upper--;
-        }
-        if (upper < 0) {
-            // ✅ 输出“空间不足”
-            cprintf("[BUDDY] 空间不足：无法分配 %d 页 (无可用块)\n", n);
-            return NULL;
-        }
-    }
     
     if (!buddy_allocator) {
         return NULL;
@@ -317,6 +297,7 @@ struct Page *buddy_alloc_pages(size_t n) {
     
     return allocated_page;
 }
+
 void buddy_free_pages(struct Page *base, size_t n) {
     if (n == 0) return;
     assert(base != NULL && buddy_allocator);
