@@ -115,7 +115,7 @@ best_fit_alloc_pages(size_t n) {
     // 遍历空闲链表，查找满足需求的空闲页框
     // 如果找到满足需求的页面，记录该页面以及当前找到的最小连续空闲页框数量
 
-    // 最佳适应算法：遍历所有空闲块，找到大小最接近n的块
+    // 遍历所有空闲块，找到大小最接近n的块
     list_entry_t *best_le = NULL;
     while ((le = list_next(le)) != &free_list) {
         struct Page *p = le2page(le, page_link);
@@ -136,7 +136,7 @@ best_fit_alloc_pages(size_t n) {
             p->property = page->property - n;
             SetPageProperty(p);
             
-            // 将剩余块重新插入链表，保持地址有序
+            // 将剩余块重新插入链表，并在插入过程中保持地址有序
             list_entry_t* le_prev = list_prev(best_le);
             list_entry_t* new_le = &free_list;
             int inserted = 0;
