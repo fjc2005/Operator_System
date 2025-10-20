@@ -23,6 +23,9 @@
 #include <defs.h>
 #include <list.h>
 
+// forward declaration to avoid header cycles
+struct kmem_cache;
+
 typedef uintptr_t pte_t;
 typedef uintptr_t pde_t;
 
@@ -36,6 +39,14 @@ struct Page {
     uint64_t flags;                 // array of flags that describe the status of the page frame
     unsigned int property;          // the num of free block, used in first fit pm manager
     list_entry_t page_link;         // free list link
+    // SLUB per-page metadata (used by slub_pmm.c)
+    struct {
+        void *freelist;             // freelist head inside this slab page
+        int inuse;                  // number of allocated objects in this slab page
+        struct kmem_cache *slab_cache; // owner cache
+        list_entry_t slab_link;     // link node for cache->slabs_partial
+        int on_partial;             // whether on slabs_partial list
+    } slub;
 };
 
 /* Flags describing the status of a page frame */
