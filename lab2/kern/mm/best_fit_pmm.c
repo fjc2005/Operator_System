@@ -127,35 +127,18 @@ best_fit_alloc_pages(size_t n) {
     }
 
     if (page != NULL) {
-        // 从链表中移除找到的最佳块
-        list_del(&(page->page_link));
+        list_entry_t *le = &(page->page_link);
         
         // 如果块大小大于需求，分割剩余部分
         if (page->property > n) {
             struct Page *p = page + n;
             p->property = page->property - n;
             SetPageProperty(p);
-            
-            // 将剩余块重新插入链表，并在插入过程中保持地址有序
-            list_entry_t* le_prev = list_prev(best_le);
-            list_entry_t* new_le = &free_list;
-            int inserted = 0;
-            while ((new_le = list_next(new_le)) != &free_list) {
-                struct Page* new_page = le2page(new_le, page_link);
-                if (p < new_page) {
-                    list_add_before(new_le, &(p->page_link));
-                    inserted = 1;
-                    break;
-                } else if (list_next(new_le) == &free_list) {
-                    list_add(new_le, &(p->page_link));
-                    inserted = 1;
-                    break;
-                }
-            }
-            if (!inserted) {
-                list_add(&free_list, &(p->page_link));
-            }
+            list_add(le, &(p->page_link));
         }
+        
+        // 从链表中移除分配的块
+        list_del(&(page->page_link));
         nr_free -= n;
         ClearPageProperty(page);
     }
