@@ -8,6 +8,7 @@
 #include <riscv.h>
 #include <stdio.h>
 #include <trap.h>
+#include "../../libs/sbi.h"
 
 #define TICK_NUM 100
 
@@ -101,6 +102,9 @@ void print_regs(struct pushregs *gpr) {
 }
 
 void interrupt_handler(struct trapframe *tf) {
+    static int ticks = 0; // 计数器，记录时钟中断次数
+    static int print_count = 0; // 记录已打印的“100 ticks”行数
+
     intptr_t cause = (tf->cause << 1) >> 1;
     switch (cause) {
         case IRQ_U_SOFT:
@@ -130,6 +134,17 @@ void interrupt_handler(struct trapframe *tf) {
              *(3)当计数器加到100的时候，我们会输出一个`100ticks`表示我们触发了100次时钟中断，同时打印次数（num）加一
             * (4)判断打印次数，当打印次数为10时，调用<sbi.h>中的关机函数关机
             */
+           clock_set_next_event(); // 设置下次时钟中断
+            ticks++; // 时钟中断计数器加1
+
+            if (ticks % 100 == 0) { // 每100次时钟中断
+                print_ticks(); // 打印“100 ticks”
+                print_count++; // 打印次数加1
+
+                if (print_count == 10) { // 打印10次后关机
+                    sbi_shutdown(); // 调用关机函数
+                }
+            }
             break;
         case IRQ_H_TIMER:
             cprintf("Hypervisor software interrupt\n");
