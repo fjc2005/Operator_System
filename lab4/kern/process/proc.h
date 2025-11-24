@@ -17,8 +17,8 @@ enum proc_state
 
 struct context
 {
-    uintptr_t ra;
-    uintptr_t sp;
+    uintptr_t ra; // 代码执行到哪一行
+    uintptr_t sp; // 当前栈帧的地址
     uintptr_t s0;
     uintptr_t s1;
     uintptr_t s2;
@@ -43,24 +43,30 @@ struct proc_struct
 {
     enum proc_state state;        // Process state
     int pid;                      // Process ID
-    int runs;                     // the running times of Proces
-    uintptr_t kstack;             // Process kernel stack
-    volatile bool need_resched;   // bool value: need to be rescheduled to release CPU?
-    struct proc_struct *parent;   // the parent process
-    struct mm_struct *mm;         // Process's memory management field
-    struct context context;       // Switch here to run process
-    struct trapframe *tf;         // Trap frame for current interrupt
-    uintptr_t pgdir;              // the base addr of Page Directroy Table(PDT)
-    uint32_t flags;               // Process flag
-    char name[PROC_NAME_LEN + 1]; // Process name
-    list_entry_t list_link;       // Process link list
-    list_entry_t hash_link;       // Process hash list
+    int runs;                     // the running times of Process
+    uintptr_t kstack;             // 进程的内核栈
+    volatile bool need_resched;   // 是否需要重新调度 如果为 true，说明该让出 CPU 了
+    struct proc_struct *parent;   // 父进程
+    struct mm_struct *mm;         // 进程的内存管理字段
+    struct context context;       // 进程的上下文
+    struct trapframe *tf;         // 当前中断的陷阱帧
+    /*context (Switch)：用于进程与进程之间的切换。是内核态代码主动调度的结果（比如 schedule() 函数）。
+    tf (Interrupt)：用于用户态与内核态之间，或者中断发生时的现场保存。*/
+    uintptr_t pgdir;              // 页目录表的基址
+    uint32_t flags;               // 进程标志
+    char name[PROC_NAME_LEN + 1]; // 进程名称
+    list_entry_t list_link;       // 进程链表
+    list_entry_t hash_link;       // 进程哈希链表
 };
 
 #define le2proc(le, member) \
     to_struct((le), struct proc_struct, member)
 
 extern struct proc_struct *idleproc, *initproc, *current;
+
+/*idleproc (PID 0): 大地。它是第 0 号进程，从来不休息（死循环），只有当所有人都没活干时，CPU 才归它。它的存在是为了保证 CPU 永远有指令可跑。*/
+/*initproc (PID 1): 始祖。它是第 1 号进程，是所有后续用户进程的祖先。*/
+/*current: 当下。指向当前占用 CPU 的那个 PCB。内核代码中凡是操作“自己”的地方，用的都是 current。*/
 
 void proc_init(void);
 void proc_run(struct proc_struct *proc);
