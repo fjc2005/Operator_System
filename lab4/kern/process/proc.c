@@ -198,7 +198,19 @@ void proc_run(struct proc_struct *proc)
          *   lsatp():                   Modify the value of satp register
          *   switch_to():              Context switching between two processes
          */
-
+        bool intr_flag;
+        struct proc_struct *prev = current; // 记录前一个进程
+        local_intr_save(intr_flag); // 禁用中断
+        {
+            current = proc; // 设置当前进程为待运行的进程
+            // 切换页表，加载新进程的页目录表
+            // SATP_SV39 是 RISC-V Sv39 分页模式的标识
+            // PPN(x) 从物理地址 x 获取物理页号
+            lsatp(SATP_SV39 | PPN(current->pgdir));
+            // 从 prev 进程切换到 current 进程
+            switch_to(&(prev->context), &(current->context));
+        }
+        local_intr_restore(intr_flag); // 恢复中断    
     }
 }
 
