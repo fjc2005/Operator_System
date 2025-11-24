@@ -205,9 +205,7 @@ void proc_run(struct proc_struct *proc)
         {
             current = proc; // 将当前进程切换为目标进程
             // 加载新进程的页目录基址到 satp 寄存器
-            // 对于 Sv39 分页模式，需要设置 MODE 字段
-            // PPN() 宏用于从物理地址获取物理页号
-            write_csr(satp, ((uint64_t)SATP_MODE_SV39 << 60) | PPN(current->pgdir));
+            lsatp(current->pgdir);
             // 执行上下文切换，从 prev 进程切换到 current 进程
             switch_to(&(prev->context), &(current->context));
         }
