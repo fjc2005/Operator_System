@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <riscv.h>
 
 /* ------------- process/thread mechanism design&implementation -------------
 (an simplified Linux process/thread mechanism )
@@ -199,18 +200,18 @@ void proc_run(struct proc_struct *proc)
          *   switch_to():              Context switching between two processes
          */
         bool intr_flag;
-        struct proc_struct *prev = current; // 记录前一个进程
-        local_intr_save(intr_flag); // 禁用中断
+        struct proc_struct *prev = current; // 保存当前进程
+        local_intr_save(intr_flag); // 禁用中断，保存中断状态
         {
-            current = proc; // 设置当前进程为待运行的进程
-            // 切换页表，加载新进程的页目录表
-            // SATP_SV39 是 RISC-V Sv39 分页模式的标识
-            // PPN(x) 从物理地址 x 获取物理页号
-            lsatp(SATP_SV39 | PPN(current->pgdir));
-            // 从 prev 进程切换到 current 进程
+            current = proc; // 将当前进程切换为目标进程
+            // 加载新进程的页目录基址到 satp 寄存器
+            // 对于 Sv39 分页模式，需要设置 MODE 字段
+            // PPN() 宏用于从物理地址获取物理页号
+            write_csr(satp, ((uint64_t)SATP_MODE_SV39 << 60) | PPN(current->pgdir));
+            // 执行上下文切换，从 prev 进程切换到 current 进程
             switch_to(&(prev->context), &(current->context));
         }
-        local_intr_restore(intr_flag); // 恢复中断    
+        local_intr_restore(intr_flag); // 恢复中断状态
     }
 }
 
