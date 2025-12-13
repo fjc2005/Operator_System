@@ -122,11 +122,22 @@ void interrupt_handler(struct trapframe *tf)
         // directly.
         // cprintf("Supervisor timer interrupt\n");
         /* LAB3 EXERCISE1   YOUR CODE :  */
-        /*(1)设置下次时钟中断- clock_set_next_event()
-         *(2)计数器（ticks）加一
-         *(3)当计数器加到100的时候，我们会输出一个`100ticks`表示我们触发了100次时钟中断，同时打印次数（num）加一
-         * (4)判断打印次数，当打印次数为10时，调用<sbi.h>中的关机函数关机
+        /*
+         * (1) 设置下次时钟中断：clock_set_next_event()
+         * (2) 计数器 ticks 加一（使用 clock.c 中的全局 ticks）
+         * (3) 每 TICK_NUM 次打印一次
+         *
+         * 注意：lab5 需要继续运行用户程序测试，不能沿用 lab3 的“打印 10 次后关机”逻辑。
+         * 同时，为了让用户态/多进程能被抢占调度，这里需要触发一次 reschedule。
          */
+        clock_set_next_event();
+        ticks++;
+        if (ticks % TICK_NUM == 0) {
+            print_ticks();
+        }
+        if (current != NULL) {
+            current->need_resched = 1;
+        }
         break;
     case IRQ_H_TIMER:
         cprintf("Hypervisor software interrupt\n");
