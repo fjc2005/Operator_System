@@ -105,13 +105,29 @@ alloc_proc(void)
          *       uint32_t flags;                             // Process flag
          *       char name[PROC_NAME_LEN + 1];               // Process name
          */
-
+         proc->state = PROC_UNINIT;                     // 初始化进程状态为未初始化
+         proc->pid = -1;                                // 初始化进程 ID
+         proc->runs = 0;                                // 初始化运行次数
+         proc->kstack = 0;                              // 初始化内核栈地址
+         proc->need_resched = 0;                        // 初始化调度标志
+         proc->parent = NULL;                           // 初始化父进程指针
+         proc->mm = NULL;                               // 初始化内存管理字段
+         memset(&proc->context, 0, sizeof(struct context)); // 清空上下文
+         proc->tf = NULL;                               // 初始化中断帧指针
+         proc->pgdir = boot_pgdir_pa;                   // 初始化页目录表地址
+         proc->flags = 0;                               // 初始化进程标志
+         memset(proc->name, 0, sizeof(proc->name));     // 清空进程名称
+         list_init(&proc->list_link);                   // 初始化进程链表链接
+         list_init(&proc->hash_link); 
         // LAB5 YOUR CODE : (update LAB4 steps)
         /*
          * below fields(add in LAB5) in proc_struct need to be initialized
          *       uint32_t wait_state;                        // waiting state
          *       struct proc_struct *cptr, *yptr, *optr;     // relations between processes
          */
+         proc->exit_code = 0;
+         proc->wait_state = 0;
+         proc->cptr = proc->yptr = proc->optr = NULL;
     }
     return proc;
 }
@@ -225,6 +241,17 @@ void proc_run(struct proc_struct *proc)
          *   lsatp():                   Modify the value of satp register
          *   switch_to():              Context switching between two processes
          */
+        bool intr_flag;
+        struct proc_struct *prev = current; // 保存当前进程
+        local_intr_save(intr_flag); // 禁用中断，保存中断状态
+        {
+            current = proc; // 将当前进程切换为目标进程
+            // 加载新进程的页目录基址到 satp 寄存器
+            lsatp(current->pgdir);
+            // 执行上下文切换，从 prev 进程切换到 current 进程
+            switch_to(&(prev->context), &(current->context));
+        }
+        local_intr_restore(intr_flag); // 恢复中断状态
     }
 }
 
@@ -442,6 +469,36 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
      *    update step 1: set child proc's parent to current process, make sure current process's wait_state is 0
      *    update step 5: insert proc_struct into hash_list && proc_list, set the relation links of process
      */
+    if ((proc = alloc_proc()) == NULL) {
+        goto fork_out;
+    }
+    proc->parent = current;
+    current->wait_state = 0;
+    //    2. call setup_kstack to allocate a kernel stack for child process
+    if(setup_kstack(proc) != 0){
+        goto bad_fork_cleanup_proc;
+    }
+    //    3. call copy_mm to dup OR share mm according clone_flag
+    if(copy_mm(clone_flags, proc) != 0){
+        goto bad_fork_cleanup_kstack;
+    }
+    //    4. call copy_thread to setup tf & context in proc_struct
+    copy_thread(proc, stack, tf);
+    //    5. insert proc_struct into hash_list && proc_list
+    bool intr_flag;
+    local_intr_save(intr_flag);
+    {
+        proc->pid = get_pid();
+        hash_proc(proc);
+
+        // LAB5: 用 set_links 建立 parent/child/sibling 关系，并把进程挂入 proc_list、维护 nr_process
+        set_links(proc);
+    }
+    local_intr_restore(intr_flag);
+    //    6. call wakeup_proc to make the new child process RUNNABLE
+    wakeup_proc(proc);
+    //    7. set ret vaule using child proc's pid
+    ret = proc->pid;
 
 fork_out:
     return ret;
