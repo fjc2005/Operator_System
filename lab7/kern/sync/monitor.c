@@ -32,8 +32,8 @@ monitor_free (monitor_t * mtp, size_t num_cv) {
 void 
 cond_signal (condvar_t *cvp) {
    //LAB7 EXERCISE1: YOUR CODE
-   cprintf("cond_signal begin: cvp %x, cvp->count %d, cvp->owner->next_count %d\n", cvp, cvp->count, cvp->owner->next_count);  
-  /*
+   cprintf("cond_signal begin: cvp %x, cvp->count %d, cvp->owner->next_count %d\n", cvp, cvp->count, cvp->owner->next_count);
+   /*
    *      cond_signal(cv) {
    *          if(cv.count>0) {
    *             mt.next_count ++;
@@ -43,7 +43,17 @@ cond_signal (condvar_t *cvp) {
    *          }
    *       }
    */
-    
+   // 如果有进程在等待这个条件变量
+   if (cvp->count > 0) {
+       // 增加next_count，表示有一个信号发送者在等待
+       cvp->owner->next_count++;
+       // 唤醒等待在条件变量上的进程
+       up(&(cvp->sem));
+       // 信号发送者等待被唤醒的进程执行完成
+       down(&(cvp->owner->next));
+       // 被唤醒后，减少next_count
+       cvp->owner->next_count--;
+   }
    cprintf("cond_signal end: cvp %x, cvp->count %d, cvp->owner->next_count %d\n", cvp, cvp->count, cvp->owner->next_count);
 }
 
@@ -62,6 +72,18 @@ cond_wait (condvar_t *cvp) {
     *         wait(cv.sem);
     *         cv.count --;
     */
-    
+    // 增加等待计数
+    cvp->count++;
+    // 如果有信号发送者在等待，唤醒它
+    if (cvp->owner->next_count > 0) {
+        up(&(cvp->owner->next));
+    } else {
+        // 否则释放管程的互斥锁
+        up(&(cvp->owner->mutex));
+    }
+    // 等待条件变量被信号唤醒
+    down(&(cvp->sem));
+    // 被唤醒后，减少等待计数
+    cvp->count--;
     cprintf("cond_wait end:  cvp %x, cvp->count %d, cvp->owner->next_count %d\n", cvp, cvp->count, cvp->owner->next_count);
 }
