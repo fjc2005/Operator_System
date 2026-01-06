@@ -32,48 +32,27 @@ monitor_free (monitor_t * mtp, size_t num_cv) {
 void 
 cond_signal (condvar_t *cvp) {
    //LAB7 填写你在lab7中实现的代码
-   cprintf("cond_signal begin: cvp %x, cvp->count %d, cvp->owner->next_count %d\n", cvp, cvp->count, cvp->owner->next_count);  
-  /*
-   *      cond_signal(cv) {
-   *          if(cv.count>0) {
-   *             mt.next_count ++;
-   *             signal(cv.sem);
-   *             wait(mt.next);
-   *             mt.next_count--;
-   *          }
-   *       }
-   */
-    if (cvp->count > 0) {
-        monitor_t* const mtp = cvp->owner;
-        mtp->next_count++;
-        up(&(cvp->sem));
-        down(&(mtp->next));
-        mtp->next_count--;
-    }
+   cprintf("cond_signal begin: cvp %x, cvp->count %d, cvp->owner->next_count %d\n", cvp, cvp->count, cvp->owner->next_count);
+   if (cvp->count > 0) {
+       cvp->owner->next_count++;
+       up(&(cvp->sem));
+       down(&(cvp->owner->next));
+       cvp->owner->next_count--;
+   }
    cprintf("cond_signal end: cvp %x, cvp->count %d, cvp->owner->next_count %d\n", cvp, cvp->count, cvp->owner->next_count);
 }
 
 // Suspend calling thread on a condition variable waiting for condition Atomically unlocks 
-// mutex and suspends calling thread on conditional variable after waking up locks mutex. Notice: mp is mutex semaphore for monitor's procedures
+// mutex and suspends calling thread on conditional variable after waking up locks mutex.
 void
 cond_wait (condvar_t *cvp) {
     //LAB7 填写你在lab7中实现的代码
     cprintf("cond_wait begin:  cvp %x, cvp->count %d, cvp->owner->next_count %d\n", cvp, cvp->count, cvp->owner->next_count);
-   /*
-    *         cv.count ++;
-    *         if(mt.next_count>0)
-    *            signal(mt.next)
-    *         else
-    *            signal(mt.mutex);
-    *         wait(cv.sem);
-    *         cv.count --;
-    */
     cvp->count++;
-    monitor_t* const mtp = cvp->owner;
-    if (mtp->next_count > 0) {
-        up(&(mtp->next));
+    if (cvp->owner->next_count > 0) {
+        up(&(cvp->owner->next));
     } else {
-        up(&(mtp->mutex));
+        up(&(cvp->owner->mutex));
     }
     down(&(cvp->sem));
     cvp->count--;
