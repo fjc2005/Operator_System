@@ -824,37 +824,37 @@ load_icode(int fd, int argc, char **kargv)
         
         // 逐页分配并拷贝数据（如果有文件内容）
         if (ph->p_filesz > 0) {
-            while (start < end) {
-                if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
-                    ret = -E_NO_MEM;
-                    goto bad_cleanup_mmap;
-                }
-                off = start - la;
-                size = PGSIZE - off;
-                if (end < la + PGSIZE) {
-                    size -= (la + PGSIZE - end);
-                }
-                
-                // 从文件读取数据到页面
-                if ((ret = load_icode_read(fd, page2kva(page) + off, size, offset)) != 0) {
-                    goto bad_cleanup_mmap;
-                }
-                start += size;
-                offset += size;
-                la += PGSIZE;
+        while (start < end) {
+            if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
+                ret = -E_NO_MEM;
+                goto bad_cleanup_mmap;
+            }
+            off = start - la;
+            size = PGSIZE - off;
+            if (end < la + PGSIZE) {
+                size -= (la + PGSIZE - end);
             }
             
+            // 从文件读取数据到页面
+            if ((ret = load_icode_read(fd, page2kva(page) + off, size, offset)) != 0) {
+                goto bad_cleanup_mmap;
+            }
+            start += size;
+            offset += size;
+            la += PGSIZE;
+        }
+        
             // 处理当前页面的剩余部分（可能需要清零）
-            end = ph->p_va + ph->p_memsz;
+        end = ph->p_va + ph->p_memsz;
             if (start < la && start < end) {
-                // 当前页面的剩余部分清零
-                off = start - (la - PGSIZE);
-                size = PGSIZE - off;
-                if (end < la) {
-                    size -= la - end;
-                }
-                memset(page2kva(page) + off, 0, size);
-                start += size;
+            // 当前页面的剩余部分清零
+            off = start - (la - PGSIZE);
+            size = PGSIZE - off;
+            if (end < la) {
+                size -= la - end;
+            }
+            memset(page2kva(page) + off, 0, size);
+            start += size;
             }
         } else {
             // p_filesz == 0，纯 BSS 段，从头开始分配并清零
@@ -1009,7 +1009,7 @@ load_icode(int fd, int argc, char **kargv)
         if ((ptep = get_pte(mm->pgdir, page_addr, 0)) == NULL || !(*ptep & PTE_V)) {
             ret = -E_INVAL;
             goto bad_cleanup_mmap;
-        }
+    }
         page = pte2page(*ptep);
         
         size_t page_offset = user_addr - page_addr;
