@@ -676,12 +676,15 @@ static int
 load_icode_read(int fd, void *buf, size_t len, off_t offset)
 {
     int ret;
+    cprintf("load_icode_read: fd=%d, len=%d, offset=%d\n", fd, len, offset);
     if ((ret = sysfile_seek(fd, offset, LSEEK_SET)) != 0)
     {
+        cprintf("load_icode_read: sysfile_seek failed with ret=%d\n", ret);
         return ret;
     }
     if ((ret = sysfile_read(fd, buf, len)) != len)
     {
+        cprintf("load_icode_read: sysfile_read returned %d, expected %d\n", ret, len);
         return (ret < 0) ? ret : -1;
     }
     return 0;
@@ -718,6 +721,230 @@ load_icode(int fd, int argc, char **kargv)
      * (8) if up steps failed, you should cleanup the env.
      */
     
+    /* (1) 创建进程的内存管理结构 */
+    if (current->mm != NULL) {
+        panic("load_icode: current->mm must be empty.\n");
+    }
+    
+    int ret = -E_NO_MEM;
+    struct mm_struct *mm;
+    
+    // 创建 mm
+    cprintf("load_icode: creating mm\n");
+    if ((mm = mm_create()) == NULL) {
+        cprintf("load_icode: mm_create failed\n");
+        goto bad_mm;
+    }
+    
+    // 创建页目录表
+    cprintf("load_icode: setting up pgdir\n");
+    if (setup_pgdir(mm) != 0) {
+        cprintf("load_icode: setup_pgdir failed\n");
+        goto bad_pgdir_cleanup_mm;
+    }
+    
+    /* (2) 读取并解析 ELF 文件头 */
+    struct Page *page;
+    struct elfhdr __elf, *elf = &__elf;
+    
+    // 读取 ELF header（从文件开始位置读取）
+    cprintf("load_icode: reading ELF header\n");
+    if ((ret = load_icode_read(fd, elf, sizeof(struct elfhdr), 0)) != 0) {
+        cprintf("load_icode: load_icode_read ELF header failed with ret=%d\n", ret);
+        goto bad_elf_cleanup_pgdir;
+    }
+    
+    // 检查 ELF 魔数
+    cprintf("load_icode: checking ELF magic, got 0x%x, expected 0x%x\n", elf->e_magic, ELF_MAGIC);
+    if (elf->e_magic != ELF_MAGIC) {
+        ret = -E_INVAL_ELF;
+        cprintf("load_icode: ELF magic check failed\n");
+        goto bad_elf_cleanup_pgdir;
+    }
+    
+    /* (3) 读取并处理每个程序段 */
+    struct proghdr __ph, *ph = &__ph;
+    uint32_t vm_flags, perm;
+    
+    for (int i = 0; i < elf->e_phnum; i++) {
+        // 读取第 i 个 program header
+        off_t phoff = elf->e_phoff + sizeof(struct proghdr) * i;
+        if ((ret = load_icode_read(fd, ph, sizeof(struct proghdr), phoff)) != 0) {
+            goto bad_cleanup_mmap;
+        }
+        
+        // 只处理 LOAD 类型的段
+        if (ph->p_type != ELF_PT_LOAD) {
+            continue;
+        }
+        if (ph->p_filesz > ph->p_memsz) {
+            ret = -E_INVAL_ELF;
+            goto bad_cleanup_mmap;
+        }
+        if (ph->p_filesz == 0) {
+            continue;
+        }
+        
+        // 建立虚拟地址空间（vma）
+        vm_flags = 0;
+        perm = PTE_U | PTE_V;
+        if (ph->p_flags & ELF_PF_X) vm_flags |= VM_EXEC;
+        if (ph->p_flags & ELF_PF_W) vm_flags |= VM_WRITE;
+        if (ph->p_flags & ELF_PF_R) vm_flags |= VM_READ;
+        
+        // 根据 ELF 段权限设置页表权限
+        if (vm_flags & VM_READ) perm |= PTE_R;
+        if (vm_flags & VM_WRITE) perm |= PTE_W;
+        if (vm_flags & VM_EXEC) perm |= PTE_X;
+        
+        // 创建 vma
+        if ((ret = mm_map(mm, ph->p_va, ph->p_memsz, vm_flags, NULL)) != 0) {
+            goto bad_cleanup_mmap;
+        }
+        
+        // 分配内存并加载段内容
+        off_t offset = ph->p_offset;
+        size_t off, size;
+        uintptr_t start = ph->p_va, end, la = ROUNDDOWN(start, PGSIZE);
+        
+        end = ph->p_va + ph->p_filesz;
+        
+        // 逐页分配并拷贝数据
+        while (start < end) {
+            if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
+                ret = -E_NO_MEM;
+                goto bad_cleanup_mmap;
+            }
+            off = start - la;
+            size = PGSIZE - off;
+            if (end < la + PGSIZE) {
+                size -= (la + PGSIZE - end);
+            }
+            
+            // 从文件读取数据到页面
+            if ((ret = load_icode_read(fd, page2kva(page) + off, size, offset)) != 0) {
+                goto bad_cleanup_mmap;
+            }
+            start += size;
+            offset += size;
+            la += PGSIZE;
+        }
+        
+        // 处理 BSS 段（p_filesz < p_memsz 的部分）
+        end = ph->p_va + ph->p_memsz;
+        if (start < la) {
+            // 当前页面的剩余部分清零
+            if (start == end) {
+                continue;
+            }
+            off = start - (la - PGSIZE);
+            size = PGSIZE - off;
+            if (end < la) {
+                size -= la - end;
+            }
+            memset(page2kva(page) + off, 0, size);
+            start += size;
+            assert((end < la && start == end) || (end >= la && start == la));
+        }
+        
+        // 剩余的 BSS 段页面
+        while (start < end) {
+            if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
+                ret = -E_NO_MEM;
+                goto bad_cleanup_mmap;
+            }
+            off = start - la;
+            size = PGSIZE - off;
+            la += PGSIZE;
+            if (end < la) {
+                size -= la - end;
+            }
+            memset(page2kva(page) + off, 0, size);
+            start += size;
+        }
+    }
+    
+    /* (4) 建立用户栈 */
+    vm_flags = VM_READ | VM_WRITE | VM_STACK;
+    if ((ret = mm_map(mm, USTACKTOP - USTACKSIZE, USTACKSIZE, vm_flags, NULL)) != 0) {
+        goto bad_cleanup_mmap;
+    }
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - PGSIZE, PTE_U | PTE_V | PTE_R | PTE_W) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 2 * PGSIZE, PTE_U | PTE_V | PTE_R | PTE_W) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 3 * PGSIZE, PTE_U | PTE_V | PTE_R | PTE_W) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 4 * PGSIZE, PTE_U | PTE_V | PTE_R | PTE_W) != NULL);
+    
+    /* (5) 设置当前进程的 mm 和 CR3 */
+    mm_count_inc(mm);
+    current->mm = mm;
+    current->pgdir = PADDR(mm->pgdir);
+    lsatp(PADDR(mm->pgdir));
+    
+    /* (6) 设置用户栈中的 argc 和 argv */
+    // 用户栈布局（从高地址到低地址）：
+    // [字符串数据] [argv数组] [argc] <- sp
+    
+    uint32_t argv_size = 0, i;
+    for (i = 0; i < argc; i++) {
+        argv_size += strnlen(kargv[i], EXEC_MAX_ARG_LEN + 1) + 1;
+    }
+    
+    // 从USTACKTOP向下布局
+    uintptr_t stacktop = USTACKTOP;
+    
+    // 1. 首先放置字符串数据
+    stacktop -= argv_size;
+    stacktop = ROUNDDOWN(stacktop, sizeof(long)); // 对齐
+    
+    // 复制字符串并记录每个字符串的地址
+    char *string_base = (char *)stacktop;
+    uintptr_t string_addrs[EXEC_MAX_ARG_NUM];
+    uint32_t offset = 0;
+    for (i = 0; i < argc; i++) {
+        string_addrs[i] = (uintptr_t)(string_base + offset);
+        strcpy(string_base + offset, kargv[i]);
+        offset += strnlen(kargv[i], EXEC_MAX_ARG_LEN + 1) + 1;
+    }
+    
+    // 2. 放置argv数组（指针数组）
+    stacktop -= (argc + 1) * sizeof(char *); // +1 for NULL terminator
+    stacktop = ROUNDDOWN(stacktop, sizeof(uintptr_t));
+    char **uargv = (char **)stacktop;
+    for (i = 0; i < argc; i++) {
+        uargv[i] = (char *)string_addrs[i];
+    }
+    uargv[argc] = NULL;
+    
+    // 3. 放置argc
+    stacktop -= sizeof(int);
+    stacktop = ROUNDDOWN(stacktop, sizeof(uintptr_t) * 2); // 16字节对齐
+    *(int *)stacktop = argc;
+    
+    /* (7) 设置中断帧，准备返回用户态 */
+    struct trapframe *tf = current->tf;
+    
+    // 初始化 trapframe
+    memset(tf, 0, sizeof(struct trapframe));
+    
+    tf->gpr.sp = stacktop;           // 用户栈指针
+    tf->epc = elf->e_entry;          // 程序入口地址
+    tf->status = (read_csr(sstatus) | SSTATUS_SPIE) & ~SSTATUS_SPP;  // 用户态
+    tf->gpr.a0 = argc;               // 第一个参数：argc
+    tf->gpr.a1 = (uintptr_t)uargv;   // 第二个参数：argv
+    
+    ret = 0;
+    
+out:
+    return ret;
+    
+bad_cleanup_mmap:
+    exit_mmap(mm);
+bad_elf_cleanup_pgdir:
+    put_pgdir(mm);
+bad_pgdir_cleanup_mm:
+    mm_destroy(mm);
+bad_mm:
+    goto out;
 }
 
 // this function isn't very correct in LAB8
@@ -804,10 +1031,13 @@ int do_execve(const char *name, int argc, const char **argv)
 
     /* sysfile_open will check the first argument path, thus we have to use a user-space pointer, and argv[0] may be incorrect */
     int fd;
+    cprintf("do_execve: opening file '%s'\n", path);
     if ((ret = fd = sysfile_open(path, O_RDONLY)) < 0)
     {
+        cprintf("do_execve: sysfile_open failed with ret=%d\n", ret);
         goto execve_exit;
     }
+    cprintf("do_execve: file opened successfully, fd=%d\n", fd);
     if (mm != NULL)
     {
         lsatp(boot_pgdir_pa);
@@ -821,10 +1051,15 @@ int do_execve(const char *name, int argc, const char **argv)
     }
     ret = -E_NO_MEM;
     ;
+    cprintf("do_execve: before load_icode, argc=%d\n", argc);
     if ((ret = load_icode(fd, argc, kargv)) != 0)
     {
+        cprintf("do_execve: load_icode failed with ret=%d\n", ret);
         goto execve_exit;
     }
+    cprintf("do_execve: load_icode succeeded\n");
+    cprintf("do_execve: epc=0x%lx, sp=0x%lx\n", current->tf->epc, current->tf->gpr.sp);
+    sysfile_close(fd);
     put_kargv(argc, kargv);
     set_proc_name(current, local_name);
     return 0;
