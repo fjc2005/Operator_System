@@ -152,7 +152,7 @@ alloc_proc(void)
         proc->lab6_run_pool.left = proc->lab6_run_pool.right = proc->lab6_run_pool.parent = NULL;
         proc->lab6_stride = 0;
         proc->lab6_priority = 0;
-
+        proc->filesp = NULL;
         
     }
     return proc;
@@ -256,15 +256,29 @@ get_pid(void)
 // NOTE: before call switch_to, should load  base addr of "proc"'s new PDT
 void proc_run(struct proc_struct *proc)
 {
-    // LAB4:填写你在lab4中实现的代码
+    if (proc != current)
+    {
+        // LAB4:EXERCISE3 YOUR CODE
         /*
-        * Some Useful MACROs, Functions and DEFINEs, you can use them in below implementation.
-        * MACROs or Functions:
-        *   local_intr_save():        Disable interrupts
-        *   local_intr_restore():     Enable Interrupts
-        *   lcr3():                   Modify the value of CR3 register
-        *   switch_to():              Context switching between two processes
-        */
+         * Some Useful MACROs, Functions and DEFINEs, you can use them in below implementation.
+         * MACROs or Functions:
+         *   local_intr_save():        Disable interrupts
+         *   local_intr_restore():     Enable Interrupts
+         *   lsatp():                   Modify the value of satp register
+         *   switch_to():              Context switching between two processes
+         */
+        bool intr_flag;
+        struct proc_struct *prev = current; // 保存当前进程
+        local_intr_save(intr_flag); // 禁用中断，保存中断状态
+        {
+            current = proc; // 将当前进程切换为目标进程
+            // 加载新进程的页目录基址到 satp 寄存器
+            lsatp(current->pgdir);
+            // 执行上下文切换，从 prev 进程切换到 current 进程
+            switch_to(&(prev->context), &(current->context));
+        }
+        local_intr_restore(intr_flag); // 恢复中断状态
+    }
     //LAB8 YOUR CODE : (update LAB4 steps)
       /*
        * below fields(add in LAB6) in proc_struct need to be initialized
