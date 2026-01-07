@@ -411,3 +411,64 @@ bool copy_string(struct mm_struct *mm, char *dst, const char *src,
         part = PGSIZE;
     }
 }
+
+// do_pgfault - 处理页面错误
+int do_pgfault(struct mm_struct *mm, uint32_t error_code, uintptr_t addr) {
+    cprintf("do_pgfault: mm=%p, error_code=0x%x, addr=0x%lx\n", mm, error_code, addr);
+    
+    if (mm == NULL) {
+        cprintf("do_pgfault: mm is NULL\n");
+        return -E_INVAL;
+    }
+    
+    // 查找包含该地址的 vma
+    struct vma_struct *vma = find_vma(mm, addr);
+    if (vma == NULL || vma->vm_start > addr) {
+        cprintf("do_pgfault: vma not found or addr not in vma range\n");
+        cprintf("do_pgfault: addr=0x%lx, ", addr);
+        if (vma) {
+            cprintf("vma: [0x%lx, 0x%lx)\n", vma->vm_start, vma->vm_end);
+        } else {
+            cprintf("vma is NULL\n");
+        }
+        return -E_INVAL;
+    }
+    
+    // 检查访问权限
+    uint32_t perm = PTE_U | PTE_V;
+    if (vma->vm_flags & VM_WRITE) {
+        perm |= (PTE_R | PTE_W);
+    } else if (vma->vm_flags & VM_READ) {
+        perm |= PTE_R;
+    }
+    if (vma->vm_flags & VM_EXEC) {
+        perm |= PTE_X;
+    }
+    
+    // 检查页表中是否已经有映射
+    pte_t *ptep = get_pte(mm->pgdir, addr, 1);  // 创建页表项如果不存在
+    if (ptep == NULL) {
+        cprintf("do_pgfault: get_pte failed\n");
+        return -E_NO_MEM;
+    }
+    
+    // 如果页面已经存在，可能是权限问题
+    if (*ptep & PTE_V) {
+        cprintf("do_pgfault: page already mapped at 0x%lx, pte=0x%lx\n", addr, *ptep);
+        // 尝试更新权限
+        *ptep = (*ptep & ~0x3FF) | perm;
+        // 刷新 TLB
+        asm volatile("sfence.vma %0" : : "r"(addr));
+        return 0;
+    }
+    
+    // 页面不存在，分配新页面
+    struct Page *page = pgdir_alloc_page(mm->pgdir, ROUNDDOWN(addr, PGSIZE), perm);
+    if (page == NULL) {
+        cprintf("do_pgfault: pgdir_alloc_page failed\n");
+        return -E_NO_MEM;
+    }
+    
+    cprintf("do_pgfault: allocated new page at 0x%lx\n", ROUNDDOWN(addr, PGSIZE));
+    return 0;
+}

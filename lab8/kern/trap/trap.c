@@ -196,13 +196,37 @@ void exception_handler(struct trapframe *tf)
         cprintf("Environment call from M-mode\n");
         break;
     case CAUSE_FETCH_PAGE_FAULT:
-        cprintf("Instruction page fault\n");
-        break;
     case CAUSE_LOAD_PAGE_FAULT:
-        cprintf("Load page fault\n");
-        break;
     case CAUSE_STORE_PAGE_FAULT:
-        cprintf("Store/AMO page fault\n");
+        // 处理页面错误
+        {
+            // tval 寄存器保存了触发 page fault 的地址
+            uintptr_t fault_addr = tf->tval;
+            uint32_t error_code = 0;
+            
+            // 设置错误码
+            if (tf->cause == CAUSE_STORE_PAGE_FAULT) {
+                error_code = 2;  // W (write)
+                cprintf("Store/AMO page fault at 0x%lx\n", fault_addr);
+            } else if (tf->cause == CAUSE_LOAD_PAGE_FAULT) {
+                error_code = 0;  // R (read)
+                cprintf("Load page fault at 0x%lx\n", fault_addr);
+            } else {
+                error_code = 1;  // X (execute)
+                cprintf("Instruction page fault at 0x%lx\n", fault_addr);
+            }
+            
+            // 调用 do_pgfault 处理
+            if (do_pgfault(current->mm, error_code, fault_addr) != 0) {
+                cprintf("do_pgfault failed: killed by kernel.\n");
+                if (current != NULL) {
+                    cprintf("current process: pid=%d, name=%s\n", 
+                            current->pid, current->name);
+                }
+                print_trapframe(tf);
+                do_exit(-E_KILLED);
+            }
+        }
         break;
     default:
         print_trapframe(tf);

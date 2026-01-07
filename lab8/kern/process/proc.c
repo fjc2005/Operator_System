@@ -728,6 +728,7 @@ load_icode(int fd, int argc, char **kargv)
     
     int ret = -E_NO_MEM;
     struct mm_struct *mm;
+    uint32_t stack_pages = 0;  // 用户栈需要的页面数
     
     // 创建 mm
     cprintf("load_icode: creating mm\n");
@@ -745,6 +746,7 @@ load_icode(int fd, int argc, char **kargv)
     
     /* (2) 读取并解析 ELF 文件头 */
     struct Page *page;
+    pte_t *ptep;
     struct elfhdr __elf, *elf = &__elf;
     
     // 读取 ELF header（从文件开始位置读取）
@@ -781,9 +783,9 @@ load_icode(int fd, int argc, char **kargv)
             ret = -E_INVAL_ELF;
             goto bad_cleanup_mmap;
         }
-        if (ph->p_filesz == 0) {
-            continue;
-        }
+        
+        // 注意：不要跳过 p_filesz == 0 的段（BSS 段）！
+        // BSS 段需要分配内存但不从文件读取
         
         // 建立虚拟地址空间（vma）
         vm_flags = 0;
@@ -793,13 +795,24 @@ load_icode(int fd, int argc, char **kargv)
         if (ph->p_flags & ELF_PF_R) vm_flags |= VM_READ;
         
         // 根据 ELF 段权限设置页表权限
+        // 注意：在 RISC-V 中，可写页面通常也需要可读权限
         if (vm_flags & VM_READ) perm |= PTE_R;
-        if (vm_flags & VM_WRITE) perm |= PTE_W;
+        if (vm_flags & VM_WRITE) perm |= (PTE_W | PTE_R);  // 可写必须可读
         if (vm_flags & VM_EXEC) perm |= PTE_X;
         
-        // 创建 vma
+        cprintf("load_icode: segment %d: va=0x%lx, memsz=0x%lx, filesz=0x%lx, flags=0x%x\n",
+                i, ph->p_va, ph->p_memsz, ph->p_filesz, ph->p_flags);
+        
+        // 创建 vma (即使 p_filesz == 0 也要创建)
         if ((ret = mm_map(mm, ph->p_va, ph->p_memsz, vm_flags, NULL)) != 0) {
             goto bad_cleanup_mmap;
+        }
+        
+        // 如果文件大小为 0（纯 BSS 段），跳过文件读取部分
+        if (ph->p_filesz == 0) {
+            // 但仍需要分配并清零页面（在后面的 BSS 处理中完成）
+            cprintf("load_icode: segment %d is pure BSS, skipping file read\n", i);
+            // 不要 continue，让代码继续处理 BSS 部分
         }
         
         // 分配内存并加载段内容
@@ -809,45 +822,46 @@ load_icode(int fd, int argc, char **kargv)
         
         end = ph->p_va + ph->p_filesz;
         
-        // 逐页分配并拷贝数据
-        while (start < end) {
-            if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
-                ret = -E_NO_MEM;
-                goto bad_cleanup_mmap;
-            }
-            off = start - la;
-            size = PGSIZE - off;
-            if (end < la + PGSIZE) {
-                size -= (la + PGSIZE - end);
+        // 逐页分配并拷贝数据（如果有文件内容）
+        if (ph->p_filesz > 0) {
+            while (start < end) {
+                if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
+                    ret = -E_NO_MEM;
+                    goto bad_cleanup_mmap;
+                }
+                off = start - la;
+                size = PGSIZE - off;
+                if (end < la + PGSIZE) {
+                    size -= (la + PGSIZE - end);
+                }
+                
+                // 从文件读取数据到页面
+                if ((ret = load_icode_read(fd, page2kva(page) + off, size, offset)) != 0) {
+                    goto bad_cleanup_mmap;
+                }
+                start += size;
+                offset += size;
+                la += PGSIZE;
             }
             
-            // 从文件读取数据到页面
-            if ((ret = load_icode_read(fd, page2kva(page) + off, size, offset)) != 0) {
-                goto bad_cleanup_mmap;
+            // 处理当前页面的剩余部分（可能需要清零）
+            end = ph->p_va + ph->p_memsz;
+            if (start < la && start < end) {
+                // 当前页面的剩余部分清零
+                off = start - (la - PGSIZE);
+                size = PGSIZE - off;
+                if (end < la) {
+                    size -= la - end;
+                }
+                memset(page2kva(page) + off, 0, size);
+                start += size;
             }
-            start += size;
-            offset += size;
-            la += PGSIZE;
+        } else {
+            // p_filesz == 0，纯 BSS 段，从头开始分配并清零
+            end = ph->p_va + ph->p_memsz;
         }
         
-        // 处理 BSS 段（p_filesz < p_memsz 的部分）
-        end = ph->p_va + ph->p_memsz;
-        if (start < la) {
-            // 当前页面的剩余部分清零
-            if (start == end) {
-                continue;
-            }
-            off = start - (la - PGSIZE);
-            size = PGSIZE - off;
-            if (end < la) {
-                size -= la - end;
-            }
-            memset(page2kva(page) + off, 0, size);
-            start += size;
-            assert((end < la && start == end) || (end >= la && start == la));
-        }
-        
-        // 剩余的 BSS 段页面
+        // 剩余的 BSS 段页面（完整的页面）
         while (start < end) {
             if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
                 ret = -E_NO_MEM;
@@ -869,25 +883,65 @@ load_icode(int fd, int argc, char **kargv)
     if ((ret = mm_map(mm, USTACKTOP - USTACKSIZE, USTACKSIZE, vm_flags, NULL)) != 0) {
         goto bad_cleanup_mmap;
     }
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - PGSIZE, PTE_U | PTE_V | PTE_R | PTE_W) != NULL);
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 2 * PGSIZE, PTE_U | PTE_V | PTE_R | PTE_W) != NULL);
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 3 * PGSIZE, PTE_U | PTE_V | PTE_R | PTE_W) != NULL);
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 4 * PGSIZE, PTE_U | PTE_V | PTE_R | PTE_W) != NULL);
     
-    /* (5) 设置当前进程的 mm 和 CR3 */
-    mm_count_inc(mm);
-    current->mm = mm;
-    current->pgdir = PADDR(mm->pgdir);
-    lsatp(PADDR(mm->pgdir));
+    // 预先计算需要多少栈空间，确保分配足够的页面
+    uint32_t stack_need = 0;
+    // 计算 argc、argv、字符串所需空间
+    for (int i = 0; i < argc; i++) {
+        stack_need += strnlen(kargv[i], EXEC_MAX_ARG_LEN + 1) + 1;
+    }
+    stack_need += (argc + 1) * sizeof(char *);  // argv 数组
+    stack_need += sizeof(int);  // argc
+    stack_need += 64;  // 额外的对齐空间
     
-    /* (6) 设置用户栈中的 argc 和 argv */
+    // 计算需要多少个页面（至少32个，最多256个）
+    // 注意：shell 程序需要较大的栈空间来处理输入和函数调用
+    stack_pages = (stack_need + PGSIZE - 1) / PGSIZE;
+    if (stack_pages < 32) stack_pages = 32;  // 至少128KB栈空间
+    if (stack_pages > 256) stack_pages = 256;  // 最多1MB栈空间
+    
+    cprintf("load_icode: allocating %d stack pages (%d KB)\n", 
+            stack_pages, stack_pages * PGSIZE / 1024);
+    
+    // 分配栈页面
+    for (uint32_t i = 1; i <= stack_pages; i++) {
+        uintptr_t stack_addr = USTACKTOP - i * PGSIZE;
+        struct Page *stack_page = pgdir_alloc_page(mm->pgdir, stack_addr, 
+                                                   PTE_U | PTE_V | PTE_R | PTE_W);
+        if (stack_page == NULL) {
+            cprintf("load_icode: failed to alloc stack page %d at 0x%lx\n", i, stack_addr);
+            ret = -E_NO_MEM;
+            goto bad_cleanup_mmap;
+        }
+        // 验证页面确实被分配了
+        pte_t *check_pte = get_pte(mm->pgdir, stack_addr, 0);
+        if (check_pte == NULL || !(*check_pte & PTE_V)) {
+            cprintf("load_icode: stack page %d at 0x%lx not properly mapped!\n", i, stack_addr);
+            ret = -E_INVAL;
+            goto bad_cleanup_mmap;
+        }
+    }
+    cprintf("load_icode: successfully allocated %d stack pages\n", stack_pages);
+    
+    // 刷新 TLB，确保新的页表映射生效
+    // 注意：这里我们还在使用内核页表，但为了保险起见还是刷新一下
+    asm volatile("sfence.vma");
+    
+    /* (5) 设置用户栈中的 argc 和 argv */
+    // ⚠️ 必须在切换页表之前设置！
     // 用户栈布局（从高地址到低地址）：
     // [字符串数据] [argv数组] [argc] <- sp
+    
+    cprintf("load_icode: setting up user stack, argc=%d\n", argc);
+    cprintf("load_icode: stack range: 0x%lx - 0x%lx (%d pages)\n",
+            USTACKTOP - stack_pages * PGSIZE, USTACKTOP, stack_pages);
     
     uint32_t argv_size = 0, i;
     for (i = 0; i < argc; i++) {
         argv_size += strnlen(kargv[i], EXEC_MAX_ARG_LEN + 1) + 1;
     }
+    
+    cprintf("load_icode: argv_size=%d bytes\n", argv_size);
     
     // 从USTACKTOP向下布局
     uintptr_t stacktop = USTACKTOP;
@@ -896,29 +950,111 @@ load_icode(int fd, int argc, char **kargv)
     stacktop -= argv_size;
     stacktop = ROUNDDOWN(stacktop, sizeof(long)); // 对齐
     
-    // 复制字符串并记录每个字符串的地址
-    char *string_base = (char *)stacktop;
+    // 复制字符串并记录每个字符串的用户态地址
+    uintptr_t ustack_strings = stacktop;
     uintptr_t string_addrs[EXEC_MAX_ARG_NUM];
-    uint32_t offset = 0;
+    uint32_t offset_str = 0;
+    
     for (i = 0; i < argc; i++) {
-        string_addrs[i] = (uintptr_t)(string_base + offset);
-        strcpy(string_base + offset, kargv[i]);
-        offset += strnlen(kargv[i], EXEC_MAX_ARG_LEN + 1) + 1;
+        string_addrs[i] = ustack_strings + offset_str;
+        
+        // 通过页表找到物理页，使用内核虚拟地址访问
+        uintptr_t user_addr = string_addrs[i];
+        size_t len = strnlen(kargv[i], EXEC_MAX_ARG_LEN + 1) + 1;
+        
+        // 复制字符串到用户栈（可能跨页）
+        size_t copied = 0;
+        while (copied < len) {
+            uintptr_t page_addr = ROUNDDOWN(user_addr + copied, PGSIZE);
+            page = NULL;
+            ptep = NULL;
+            
+            // 获取页表项
+            if ((ptep = get_pte(mm->pgdir, page_addr, 0)) == NULL || !(*ptep & PTE_V)) {
+                // 页面不存在，这不应该发生，因为我们已经分配了栈页面
+                ret = -E_INVAL;
+                goto bad_cleanup_mmap;
+            }
+            page = pte2page(*ptep);
+            
+            // 计算在页内的偏移和可复制的长度
+            size_t page_offset = (user_addr + copied) - page_addr;
+            size_t copy_len = PGSIZE - page_offset;
+            if (copy_len > len - copied) {
+                copy_len = len - copied;
+            }
+            
+            // 使用内核虚拟地址访问
+            char *kva = (char *)page2kva(page) + page_offset;
+            memcpy(kva, kargv[i] + copied, copy_len);
+            
+            copied += copy_len;
+        }
+        
+        offset_str += len;
     }
     
     // 2. 放置argv数组（指针数组）
     stacktop -= (argc + 1) * sizeof(char *); // +1 for NULL terminator
     stacktop = ROUNDDOWN(stacktop, sizeof(uintptr_t));
-    char **uargv = (char **)stacktop;
-    for (i = 0; i < argc; i++) {
-        uargv[i] = (char *)string_addrs[i];
+    uintptr_t ustack_argv = stacktop;
+    
+    // 写入 argv 数组
+    for (i = 0; i <= argc; i++) {  // 包括最后的 NULL
+        uintptr_t user_addr = ustack_argv + i * sizeof(char *);
+        uintptr_t page_addr = ROUNDDOWN(user_addr, PGSIZE);
+        page = NULL;
+        ptep = NULL;
+        
+        if ((ptep = get_pte(mm->pgdir, page_addr, 0)) == NULL || !(*ptep & PTE_V)) {
+            ret = -E_INVAL;
+            goto bad_cleanup_mmap;
+        }
+        page = pte2page(*ptep);
+        
+        size_t page_offset = user_addr - page_addr;
+        char **kva = (char **)(page2kva(page) + page_offset);
+        
+        if (i < argc) {
+            *kva = (char *)string_addrs[i];  // 指向用户态字符串地址
+        } else {
+            *kva = NULL;  // 最后一个是 NULL
+        }
     }
-    uargv[argc] = NULL;
     
     // 3. 放置argc
     stacktop -= sizeof(int);
     stacktop = ROUNDDOWN(stacktop, sizeof(uintptr_t) * 2); // 16字节对齐
-    *(int *)stacktop = argc;
+    
+    // 检查栈是否溢出（stacktop 必须在已分配的栈范围内）
+    if (stacktop < USTACKTOP - stack_pages * PGSIZE) {
+        cprintf("load_icode: stack overflow! stacktop=0x%lx, min=0x%lx, allocated %d pages\n", 
+                stacktop, USTACKTOP - stack_pages * PGSIZE, stack_pages);
+        ret = -E_NO_MEM;
+        goto bad_cleanup_mmap;
+    }
+    
+    // 写入 argc
+    uintptr_t user_addr = stacktop;
+    uintptr_t page_addr = ROUNDDOWN(user_addr, PGSIZE);
+    page = NULL;
+    ptep = NULL;
+    
+    if ((ptep = get_pte(mm->pgdir, page_addr, 0)) == NULL || !(*ptep & PTE_V)) {
+        ret = -E_INVAL;
+        goto bad_cleanup_mmap;
+    }
+    page = pte2page(*ptep);
+    
+    size_t page_offset = user_addr - page_addr;
+    int *kva_argc = (int *)(page2kva(page) + page_offset);
+    *kva_argc = argc;
+    
+    /* (6) 设置当前进程的 mm 和 CR3 */
+    mm_count_inc(mm);
+    current->mm = mm;
+    current->pgdir = PADDR(mm->pgdir);
+    lsatp(PADDR(mm->pgdir));
     
     /* (7) 设置中断帧，准备返回用户态 */
     struct trapframe *tf = current->tf;
@@ -930,7 +1066,10 @@ load_icode(int fd, int argc, char **kargv)
     tf->epc = elf->e_entry;          // 程序入口地址
     tf->status = (read_csr(sstatus) | SSTATUS_SPIE) & ~SSTATUS_SPP;  // 用户态
     tf->gpr.a0 = argc;               // 第一个参数：argc
-    tf->gpr.a1 = (uintptr_t)uargv;   // 第二个参数：argv
+    tf->gpr.a1 = (uintptr_t)ustack_argv;   // 第二个参数：argv
+    
+    cprintf("load_icode: complete! entry=0x%lx, sp=0x%lx, argc=%d, argv=0x%lx\n",
+            tf->epc, tf->gpr.sp, tf->gpr.a0, tf->gpr.a1);
     
     ret = 0;
     
